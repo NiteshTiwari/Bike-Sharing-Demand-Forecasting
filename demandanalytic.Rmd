@@ -1,0 +1,300 @@
+---
+title: "Demand Forecasting"
+author: "Ying Haw Lee"
+date: "July 27, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE}
+#Loading require packages
+library(car)
+library(ggplot2)
+library(forecast)
+library(corrplot)
+require(plyr)
+require(dplyr)
+require(reshape2)
+require(forecast)
+require(randomForest)
+require(caret)
+require(nnet)
+require(mlbench)
+require(caretEnsemble)
+```
+
+```{r echo=FALSE}
+#Read in data
+ setwd("~/Older Files/Data Science/Graduate School Coursework/UT San Antonio/Spring 2016- STA5103 Applied Statistics/Capitalbikeshare")
+
+bike.train <- read.csv("Capital_Bike_Share_demand.csv",stringsAsFactors = FALSE)
+bike.test <- read.csv("test.csv",stringsAsFactors = FALSE)
+```
+# Introduction 
+
+
+
+```{r cleaning,echo=FALSE}
+# Further data cleaning
+
+# Create a function to do the task
+cleaning=function(data=data){
+        data$quarter=as.factor(ifelse(data$month %in% c(3,4,5),"Spring",ifelse(data$month %in% c(6,7,8),"Summer",ifelse(data$month %in% c(9,10,11),"Autumn","Winter"))))
+        levels(data$Events)[levels(data$Events)==""]<-"Normal"
+        data$PrecipitationIn[data$PrecipitationIn=="T"]=0
+        
+        # Wind direction cleaning
+        data$WindDirDegrees=data$WindDirDegrees.br...
+        data$WindDirDegrees=gsub("<br />","",data$WindDirDegrees)
+        
+        # Events
+        
+        data$Events[data$Events==""]="Normal"
+        # Modify the class of the object
+        data<-data%>%mutate(month=as.factor(month),day=as.factor(day),hour=as.factor(hour),weekday=as.factor(weekday),workday=as.factor(workday),hour=as.factor(hour),Events=as.factor(Events),CloudCover=as.factor(CloudCover),PrecipitationIn=as.numeric(PrecipitationIn),WindDirDegrees=as.numeric(WindDirDegrees))
+        
+        # Rearrange the dataframe
+        data=select(data,year,month,day,weekday,workday,Events,quarter,Mean.TemperatureF,MeanDew.PointF,Mean.Humidity,Mean.Sea.Level.PressureIn,Mean.Wind.SpeedMPH,PrecipitationIn,CloudCover,WindDirDegrees,Casual,Registered)
+        
+    
+        #return the data
+        return(data)
+}
+
+summarize_by_time=function(data){
+  data1=bike.train%>%group_by(year,month,day)%>%summarize(Casual=mean(Casual),Registered=mean(Registered))
+  data2=bike.train%>%group_by(year,month,day)%>%sample_n(1)%>%select(-Casual)%>%select(-Registered)
+  data=merge(data1,data2,by=c("year","month","day"))
+  data=data%>%arrange(year,month,day)
+}
+
+
+# Apply cleaning function on both training and testing dataset
+bike.train=cleaning(bike.train)
+bike.test=cleaning(bike.test)
+
+# Apply Summarize_by_time function to bike.train
+bike.train=summarize_by_time(bike.train)
+bike.test=summarize_by_time(bike.train)
+```
+
+
+### Feature Engineering for the Events
+
+```{r}
+table(bike.train$Events)
+```
+
+If you look at the event variable, some of the groups like "Rain-Snow'Thunderstorm" and "Rain-Hail" have only one instance.It might worth decomposing the Event variable into several dummy variables such as "Fog","Rain","Snow","Thunderstorm","Hail"
+
+ 
+```{r}
+feature_engineering=function(data){
+    data$Fog=ifelse(grepl("Fog",data$Events),1,0)
+    data$Rain=ifelse(grepl("Rain",data$Events),1,0)
+    data$Snow=ifelse(grepl("Snow",data$Events),1,0)
+    data$Thunderstorm=ifelse(grepl("Thunderstorm",data$Events),1,0)
+    data$Hail=ifelse(grepl("Hail",data$Events),1,0)
+    
+    data$Events=NULL
+
+  return(data)
+}
+
+bike.train=feature_engineering(bike.train)
+bike.test=feature_engineering(bike.test)
+```
+
+
+
+# Exploratory data Analysis
+
+```{r}
+# Total bike rentals per year
+bike.train%>%group_by(year)%>%summarise(Casual=sum(Casual),Registered=sum(Registered))%>%melt(id.vars="year")%>%ggplot(aes(x=factor(year),y=value,fill=variable))+geom_bar(stat="identity",position="dodge")+ggtitle("Total number of bikes rented per year")+xlab("year")+ylab("Total bike rentals")
+```
+
+You can clearly see an increasing trend in the demand of bike renting from 2011 to 2015 for both casual and registered users. What worth noticing is that the rate of increasing in registered users is higher, going from 2011 to 2012. Then the rate of increasing in registered users is slight smaller and constant for the following three years. 
+
+Looking at the casual users, you can see that there is a steady increase from 2011 to 2015. 
+
+When comparing the increasing rate between Casual users and Register users, we see that the user base of registered bike renter is increasing in a higher rate than that of the casual bike renter, which can be translated as the concept of bike sharing has been increasingly accepted by people living locally in Washington DC. 
+
+# Monthly  
+```{r}
+# Average bike rentals per month
+qplot(data=bike.train,x=month,y=Casual,color=Mean.TemperatureF,geom="jitter")+scale_colour_gradientn("Temp (°F)", colours=c("#5e4fa2", "#3288bd", "#66c2a5", "#abdda4", "#e6f598", "#fee08b", "#fdae61", "#f46d43", "#d53e4f", "#9e0142"))+geom_boxplot(outlier.shape = NA, alpha = 0.1,fatten = 3)+ggtitle("The number of bikes rented by Casual users \n\  per month")
+
+qplot(data=bike.train,x=month,y=Registered,color=Mean.TemperatureF,geom="jitter")+scale_colour_gradientn("Temp (°F)", colours=c("#5e4fa2", "#3288bd", "#66c2a5", "#abdda4", "#e6f598", "#fee08b", "#fdae61", "#f46d43", "#d53e4f", "#9e0142"))+geom_boxplot(outlier.shape = NA, alpha = 0.1,fatten = 3)+ggtitle("The number of bikes rented by Registered users \n\  per month")
+```
+When looking at the boxplot of bike rentals of both registered and casual users, we found that in the month of May, June ,July and August when the temperature are warmer, there are more bike demands than that of the other months. People tends to commute to work more often during those months that are warmer. There are more summer visitors to Washington DC, just like everywhere else in the states and that visitors also tends to choose to travel around Washington DC by the mean of bicycles during summer time. 
+
+
+
+# Objectives
+The objective of study can be broken down into two parts:
+(a) Build predictive model to predict the bike demand for the next two quarters
+(b) Study the time it took for each bike station to go oversupply or undersupply at different months of the year and build a model to predict the rate at which a particular bike station will go oversupply or undersupply at the beginning of the day. 
+
+# Part(a)
+Let's examine the correlation matrix of all the numeric variable in our dataset. 
+```{r}
+
+#findnumeic function 
+findnumeric=function(data=data){
+        numeric=as.character()
+        for(i in 2:length(names(data))){
+                if (is.numeric(data[,i])) {
+                   names_T=colnames(data)[i];numeric=c(numeric,names_T)     
+                } else next
+        }
+        return(numeric)
+}
+
+numericdata=bike.train[,colnames(bike.train)%in% findnumeric(bike.train)]
+numericdata=numericdata[,!names(numericdata) %in% c("Min.TemperatureF","Max.TemperatureF","Min.DewpointF","Max.DewpointF","Max.Humidity","Min.Humidity","Max.Sea.Level.PressureIn","Min.Sea.Level.PressureIn","Max.VisibilityMiles","Min.VisibilityMiles","Max.Wind.SpeedMPH")]
+
+corr=cor(numericdata,use="complete.obs")
+corrplot(corr, order="hclust",tl.col="black", tl.srt=45)
+```
+The insight we can draw from the correlation matrix is that temperature and dewpoint are positively correlated with the demand(Casual or Registered), whereas Precipitation and Windspeed seems to be mildly correlated with the bike rental demand. We can also observe some multicollinearity- which happens when two or more predictors in the model are explaining the same thing in the response variable. Among all, the highly correlated relationship between temperature and dew point is worth noting. 
+
+```{r,echo=FALSE}
+#Let's assess the correlation of lag terms with the data
+lagcorrelation=data.frame()
+
+lag(bike.train$Casual)
+
+
+
+lagcorrelation_T=NULL
+lagcorrelation_table=NULL
+
+lagcorrelationfunction=function(data,j=0,l=0,period="annual"){
+  lagcorrelation=NULL
+     for (k in 1:4){
+      if (k ==1) {original=data$price.regup}
+     else if (k ==2) {original=data$price.regdown}
+     else if (k ==3) {original=data$signal.regup}
+     else {original=data$signal.regdown}
+  
+        # Compute the hourly lag correlation
+      hourlylagcorrelation=data.frame()
+      for (i in 1:23){
+        lag=lag(original,i)
+        cor=cor(original,lag,use="pairwise.complete.obs")
+        row=data.frame(Lag=paste(i,"h"),Correlation=cor,type=type[k])
+        hourlylagcorrelation=rbind(hourlylagcorrelation,row)
+      }
+      
+      # Compute the daily lag correlation
+      dailylagcorrelation=data.frame()
+      for (i in 1:6){
+         lag=lag(original,i*24)
+        cor=cor(original,lag,use="pairwise.complete.obs")
+         row=data.frame(Lag=paste(i,"d"),Correlation=cor,type=type[k])
+        dailylagcorrelation=rbind(dailylagcorrelation,row)
+      }
+      
+      
+      # Compute the weekly lag correlation
+      weeklylagcorrelation=data.frame()
+      for (i in 1:3){
+         lag=lag(original,i*24*7)
+         cor=cor(original,lag,use="pairwise.complete.obs")
+         row=data.frame(Lag=paste(i,"w"),Correlation=cor,type=type[k])
+        weeklylagcorrelation=rbind(weeklylagcorrelation,row)
+      }
+      
+      # Compute the monthly lag correlation
+      monthlylagcorrelation=data.frame()
+      for (i in 1:11){
+        if (i %in% c(1,3,5,7,9,11)) {lag=lag(original,i*24*31)} 
+        else if (i %in% c(4,6,8,10,12)) {lag=lag(original,i*24*30)} 
+        else if (i==2) {lag=lag(original,i*24*28)}
+        
+         cor=cor(original,lag,use="pairwise.complete.obs")
+         row=data.frame(Lag=paste(i,"m"),Correlation=cor,type=type[k])
+        monthlylagcorrelation=rbind(monthlylagcorrelation,row)
+      }
+      
+      #Combine all the lag correlation tables
+      lagcorrelation_T=rbind(hourlylagcorrelation,dailylagcorrelation,weeklylagcorrelation,monthlylagcorrelation)
+      lagcorrelation=rbind(lagcorrelation,lagcorrelation_T)
+      
+     }
+}
+```
+
+
+```{r echo=FALSE}
+# Train a model across all the training data and plot the variable importance
+features=bike.train[,!names(bike.train)%in% c("Casual","Registered")]
+registered.train=bike.train%>%select(-Casual)
+casual.train=bike.train%>%select(-Registered)
+
+
+system.time(rf <- randomForest(registered.train, y=registered.train$Registered, ntree=100, importance=TRUE))
+
+imp <- importance(rf, type=1)
+featureImportance <- data.frame(Feature=row.names(imp), Importance=imp[,1])%>%filter(!Feature=="Registered")
+
+p <- ggplot(featureImportance, aes(x=reorder(Feature, Importance), y=Importance)) +
+     geom_bar(stat="identity", fill="#53cfff") +
+     coord_flip() + 
+     theme_light(base_size=20) +
+     xlab("Importance") +
+     ylab("") + 
+     ggtitle("Random Forest Feature Importance\n") +
+     theme(plot.title=element_text(size=18))
+
+p
+```
+
+The Random Forest Feature Importance plot shows us that variables such as year, Mean Temperature, weekday(which day of the week), month, Precipitation, Mean Dwe point, quarter, CloudCOver as well Events are important factors (important index above 2.5)
+
+```{r}
+
+# Random Search
+seed=1000
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+set.seed(seed)
+mtry <- sqrt((dim(registered.train)[2]-2))
+tunegrid <- expand.grid(.mtry=mtry)
+metric <- "RSME"
+rf_default <- train(Registered~., data=registered.train, method="rf", metric=metric, tuneLength=15, trControl=control)
+   print(rf_random)
+
+print(rf_default)
+plot(rf_random)
+
+
+predict.randomforest=predict(rf,newdata=bike.test[,!names(bike.test)%in% c("Casual","Registered")])
+```
+As Random Forest Feature Importance chart indicates, the most important feature is hour, followed by weekday,year and day of the week. The importance of the weather information such as Wind Direction, Wind speed,Humidity and Temperature are all deemed not very significant in the random forest classification tree.
+
+
+
+```{r}
+ctrl=trainControl(method="cv",number=10)
+
+ridgeFit1 <- train(Registered ~ .-day-quarter, data = registered.train,method = 'ridge', preProc = c("center", "scale"), metric = "RMSE",trControl=ctrl)
+
+
+
+
+lm=train(Registered~.-day-quarter,data=registered.train,method="lm",trControl=ctrl)
+```
+
+
+```{r}
+casual.ts=msts(bike.train$Casual,seasonal.periods=c(24,24*31,365*24))
+
+```
+
+
+
+
